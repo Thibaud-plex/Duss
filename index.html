@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>3V Sécurité</title>
+<meta name="theme-color" content="#0f1b2d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="3V Sécu">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="map" aria-label="Carte des 3 Vallées"></div>
+
+<header id="topbar">
+  <button id="riskChip" class="chip" title="Risque avalanche">
+    <span class="dot" id="riskDot"></span><span id="riskText">Risque avalanche ?</span>
+  </button>
+  <button id="wxChip" class="chip" title="Météo"><span id="wxText">Météo…</span></button>
+</header>
+
+<div id="mapControls">
+  <button id="btn3d" class="ctl" title="Vue 3D / à plat">3D</button>
+  <button id="btnLayers" class="ctl" title="Calques">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3 2 8l10 5 10-5-10-5Zm0 12.2L4.2 11.3 2 12.4l10 5 10-5-2.2-1.1L12 15.2Zm0 4L4.2 15.3 2 16.4l10 5 10-5-2.2-1.1L12 19.2Z"/></svg>
+  </button>
+  <button id="btnLocate" class="ctl" title="Ma position">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm9 3h-2.07A7 7 0 0 0 13 5.07V3h-2v2.07A7 7 0 0 0 5.07 11H3v2h2.07A7 7 0 0 0 11 18.93V21h2v-2.07A7 7 0 0 0 18.93 13H21v-2Zm-9 6a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z"/></svg>
+  </button>
+</div>
+
+<div id="layersMenu" class="popover hidden" role="dialog" aria-label="Calques">
+  <h3>Fond de carte</h3>
+  <label><input type="radio" name="base" value="plan" checked> Plan IGN</label>
+  <label><input type="radio" name="base" value="ortho"> Photo aérienne</label>
+  <h3>Afficher</h3>
+  <label><input type="checkbox" id="lyPistes" checked> Pistes et remontées</label>
+  <label><input type="checkbox" id="lyOff" checked> Itinéraires hors-piste</label>
+  <label><input type="checkbox" id="lySlopes"> Pentes dangereuses (&gt; 30°)</label>
+  <label><input type="checkbox" id="lyTraces"> Traces hivernales IGN (les plus sûres)</label>
+  <div id="slopeLegend" class="legend hidden">
+    <span style="background:#f2e600"></span>30–35°
+    <span style="background:#ff8c00"></span>35–40°
+    <span style="background:#e3001b"></span>40–45°
+    <span style="background:#b0369f"></span>&gt; 45°
+  </div>
+  <button id="btnOffline" class="btn secondary small">Enregistrer la carte pour le hors-ligne</button>
+  <p id="offlineStatus" class="muted small"></p>
+</div>
+
+<!-- Fiche de détail (piste, remontée, itinéraire) -->
+<section id="sheet" class="sheet hidden" aria-live="polite">
+  <div class="grab"></div>
+  <button class="close" id="sheetClose" aria-label="Fermer">✕</button>
+  <div id="sheetBody"></div>
+</section>
+
+<!-- Panneaux plein écran -->
+<section id="panel-meteo" class="panel hidden">
+  <header><h2>Météo — 5 prochaines heures</h2><button class="close" data-close>✕</button></header>
+  <div class="panel-body" id="meteoBody"><p class="muted">Chargement…</p></div>
+</section>
+
+<section id="panel-alertes" class="panel hidden">
+  <header><h2>Alertes et sécurité</h2><button class="close" data-close>✕</button></header>
+  <div class="panel-body" id="alertesBody"></div>
+</section>
+
+<section id="panel-forfaits" class="panel hidden">
+  <header><h2>Forfaits et prix</h2><button class="close" data-close>✕</button></header>
+  <div class="panel-body" id="forfaitsBody"></div>
+</section>
+
+<section id="panel-position" class="panel hidden">
+  <header><h2>Partager ma position</h2><button class="close" data-close>✕</button></header>
+  <div class="panel-body" id="positionBody"></div>
+</section>
+
+<nav id="tabbar">
+  <button data-tab="carte" class="active"><span class="ico">🗺️</span>Carte</button>
+  <button data-tab="meteo"><span class="ico">🌨️</span>Météo</button>
+  <button data-tab="alertes"><span class="ico">⚠️</span>Alertes</button>
+  <button data-tab="forfaits"><span class="ico">🎟️</span>Forfaits</button>
+  <button data-tab="position" class="sos"><span class="ico">📍</span>Position</button>
+</nav>
+
+<div id="toast" class="toast hidden"></div>
+
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-card" id="modalCard"></div>
+</div>
+
+<script src="vendor/maplibre-gl.js"></script>
+<script src="lib.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
