@@ -24,8 +24,10 @@ L'adresse doit commencer par **https** : le GPS et le mode hors-ligne ne fonctio
 
 | Fonction | Source |
 |---|---|
-| Fond de carte, photo aérienne, carte des pentes, traces hivernales | IGN (Géoplateforme) |
-| Relief en 3D et calcul des pentes | AWS Terrain Tiles |
+| Fond « Relief » (couleurs d'altitude, ombrage, courbes de niveau), 3D, calcul des pentes | AWS Terrain Tiles, avec le module maplibre-contour pour les courbes |
+| Fond « Topo » | OpenTopoMap |
+| Plan IGN, photo aérienne, carte des pentes, traces hivernales | IGN (Géoplateforme) |
+| Noms des sommets | OpenStreetMap |
 | Pistes et remontées | OpenStreetMap |
 | Itinéraires hors-piste et sorties récentes | Camptocamp (collaboratif) |
 | Météo | Open-Meteo, modèle AROME de Météo-France |
@@ -34,7 +36,15 @@ L'adresse doit commencer par **https** : le GPS et le mode hors-ligne ne fonctio
 
 Si la carte des pentes de l'IGN ne répond pas, l'appli calcule elle-même les pentes à partir du relief.
 
-## 4. Pour modifier
+## 4. Utilisation sur les pistes
+
+- **Bandeau du haut** : le risque avalanche du jour (à saisir le matin) et la météo. Touche l'un ou l'autre pour le détail.
+- **Toucher n'importe où sur la carte** affiche l'altitude, la pente et l'orientation à cet endroit.
+- **Toucher une piste, une remontée ou un point orange** affiche sa fiche détaillée.
+- **Boutons de droite** : 3D ou à plat, choix du fond de carte et des calques, carte des pentes, ta position.
+- **Bouton rouge SOS** : appel au 112 et envoi de ta position.
+
+## 5. Pour modifier
 
 - Les prix sont dans `app.js`, en haut du fichier (bloc `PRICES`).
 - Les textes sur la faune et la flore sont dans `lib.js`, dans la fonction `nature`.

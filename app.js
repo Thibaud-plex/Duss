@@ -18,6 +18,8 @@
     overpass: ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter'],
     c2c: 'https://api.camptocamp.org',
     meteo: 'https://api.open-meteo.com/v1/forecast',
+    topo: ['https://a.tile.opentopomap.org/{z}/{x}/{y}.png', 'https://b.tile.opentopomap.org/{z}/{x}/{y}.png', 'https://c.tile.opentopomap.org/{z}/{x}/{y}.png'],
+    glyphs: 'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf',
     bera: id => `https://public-api.meteofrance.fr/public/DPBRA/v1/massif/BRA?id-massif=${id}&format=xml`
   };
   const LAYERS_IGN = {
@@ -57,7 +59,7 @@
 
   // ------------------------------------------------------------------ État
   const state = {
-    map: null, data: null, routes: null, pos: null, is3d: false, base: 'plan',
+    map: null, data: null, routes: null, pos: null, is3d: false, base: 'relief', slopes: false, layers: {}, domain: null, ring: null, peakMarkers: [],
     slopeSource: 'ign', wx: null, wxAt: null, selected: null
   };
 
@@ -153,88 +155,160 @@
   }
 
   // ------------------------------------------------------------------ Carte
+  // Palette d'altitude (vallées vertes -> alpages -> rochers -> neiges éternelles)
+  const HYPSO = ['interpolate', ['linear'], ['elevation'],
+    400, '#4f7f35', 1000, '#6f9a3f', 1500, '#9db454', 1900, '#cfc675', 2250, '#dcc38f',
+    2600, '#c49c72', 2900, '#a37d5e', 3200, '#948c86', 3450, '#d9dee3', 3800, '#ffffff'];
+
   function initMap() {
     maplibregl.addProtocol('slope', slopeProtocol);
+    // Courbes de niveau calculées à partir du relief, dans un « worker » pour ne pas ralentir
+    let contourUrl = null;
+    try {
+      state.demContour = new mlcontour.DemSource({ url: URLS.dem, encoding: 'terrarium', maxzoom: 14, worker: true, cacheSize: 80 });
+      state.demContour.setupMaplibre(maplibregl);
+      contourUrl = state.demContour.contourProtocolUrl({
+        thresholds: { 10: [200, 1000], 11: [100, 500], 12: [100, 500], 13: [50, 250], 14: [20, 100], 15: [10, 50] },
+        elevationKey: 'ele', levelKey: 'level', contourLayer: 'contours'
+      });
+    } catch (e) { contourUrl = null; }
+
     const attrIGN = '© <a href="https://www.ign.fr">IGN</a>';
+    const dom = store.get('domain', null);
     const map = new maplibregl.Map({
       container: 'map',
-      center: L.CENTER, zoom: 11.3, pitch: 0, maxPitch: 80,
-      maxBounds: [[L.BBOX.west - 0.25, L.BBOX.south - 0.2], [L.BBOX.east + 0.25, L.BBOX.north + 0.2]],
+      center: L.CENTER, zoom: 11, pitch: 0, maxPitch: 80, minZoom: 9.5,
+      maxBounds: dom ? boundsFor(dom, 9000) : [[L.BBOX.west - 0.12, L.BBOX.south - 0.1], [L.BBOX.east + 0.12, L.BBOX.north + 0.1]],
       attributionControl: { compact: true },
       style: {
         version: 8,
-        sources: {
+        glyphs: URLS.glyphs,
+        sky: { 'sky-color': '#7fb0dd', 'horizon-color': '#dfe6ec', 'fog-color': '#dfe6ec', 'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.7, 'fog-ground-blend': 0.55, 'atmosphere-blend': 0 },
+        sources: Object.assign({
           plan: { type: 'raster', tiles: [LAYERS_IGN.plan], tileSize: 256, maxzoom: 19, attribution: attrIGN },
           ortho: { type: 'raster', tiles: [LAYERS_IGN.ortho], tileSize: 256, maxzoom: 19, attribution: attrIGN },
-          dem: { type: 'raster-dem', tiles: [URLS.dem], tileSize: 256, maxzoom: 14, encoding: 'terrarium', attribution: 'Relief © Mapzen / AWS Terrain Tiles' },
+          topo: { type: 'raster', tiles: URLS.topo, tileSize: 256, maxzoom: 17, attribution: '© <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)' },
+          dem: { type: 'raster-dem', tiles: [URLS.dem], tileSize: 256, maxzoom: 14, encoding: 'terrarium', attribution: 'Relief © AWS Terrain Tiles' },
           demHill: { type: 'raster-dem', tiles: [URLS.dem], tileSize: 256, maxzoom: 14, encoding: 'terrarium' },
           slopesIgn: { type: 'raster', tiles: [LAYERS_IGN.slopes], tileSize: 256, maxzoom: 17, attribution: attrIGN },
           slopesCalc: { type: 'raster', tiles: ['slope://{z}/{x}/{y}'], tileSize: 256, minzoom: 10, maxzoom: 14 },
           traces: { type: 'raster', tiles: [LAYERS_IGN.traces], tileSize: 256, maxzoom: 18, attribution: attrIGN }
-        },
+        }, contourUrl ? { contours: { type: 'vector', tiles: [contourUrl], maxzoom: 15 } } : {}),
         layers: [
-          { id: 'bg', type: 'background', paint: { 'background-color': '#e8ecef' } },
-          { id: 'plan', type: 'raster', source: 'plan' },
+          { id: 'bg', type: 'background', paint: { 'background-color': '#dfe6ec' } },
+          { id: 'relief', type: 'color-relief', source: 'demHill', paint: { 'color-relief-color': HYPSO, 'color-relief-opacity': 1 } },
+          { id: 'plan', type: 'raster', source: 'plan', layout: { visibility: 'none' } },
+          { id: 'topo', type: 'raster', source: 'topo', layout: { visibility: 'none' } },
           { id: 'ortho', type: 'raster', source: 'ortho', layout: { visibility: 'none' } },
-          { id: 'hill', type: 'hillshade', source: 'demHill', paint: { 'hillshade-exaggeration': 0.35, 'hillshade-shadow-color': '#2b3a4a' } },
-          { id: 'slopesIgn', type: 'raster', source: 'slopesIgn', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.6 } },
+          { id: 'hill', type: 'hillshade', source: 'demHill', paint: { 'hillshade-exaggeration': 0.75, 'hillshade-shadow-color': '#2e241b', 'hillshade-highlight-color': '#fff7e2', 'hillshade-accent-color': '#4a3b2c', 'hillshade-illumination-direction': 315 } },
+          { id: 'slopesIgn', type: 'raster', source: 'slopesIgn', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.62 } },
           { id: 'slopesCalc', type: 'raster', source: 'slopesCalc', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.85 } },
           { id: 'traces', type: 'raster', source: 'traces', layout: { visibility: 'none' } }
-        ]
+        ].concat(contourUrl ? [
+          { id: 'contours', type: 'line', source: 'contours', 'source-layer': 'contours', paint: {
+            'line-color': 'rgba(70,45,20,0.45)', 'line-width': ['match', ['get', 'level'], 1, 1.3, 0.5] } },
+          { id: 'contour-labels', type: 'symbol', source: 'contours', 'source-layer': 'contours', filter: ['>', ['get', 'level'], 0], minzoom: 12.5,
+            layout: { 'symbol-placement': 'line', 'text-size': 12, 'text-field': ['concat', ['to-string', ['get', 'ele']], ' m'], 'text-font': ['Noto Sans Regular'] },
+            paint: { 'text-color': '#4a3520', 'text-halo-color': 'rgba(255,255,255,0.85)', 'text-halo-width': 1.4 } }
+        ] : [])
       }
     });
     state.map = map;
-    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true, showZoom: false }), 'bottom-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
     const geo = new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: true }, trackUserLocation: true, showAccuracyCircle: true });
     map.addControl(geo, 'bottom-right');
     state.geo = geo;
     geo.on('geolocate', e => {
       state.pos = { lat: e.coords.latitude, lon: e.coords.longitude, alt: e.coords.altitude, acc: e.coords.accuracy, t: Date.now() };
+      $('#btnLocate').classList.add('on');
     });
-    geo.on('error', () => toast('Position GPS indisponible. Autorise la localisation pour Safari dans Réglages > Confidentialité.'));
+    geo.on('trackuserlocationend', () => $('#btnLocate').classList.remove('on'));
+    geo.on('error', () => toast('Position GPS indisponible. Autorise la localisation dans Réglages › Confidentialité.'));
 
     map.on('error', e => {
-      const sid = e && e.sourceId;
-      if (sid === 'slopesIgn' && state.slopeSource === 'ign') {
+      if (e && e.sourceId === 'slopesIgn' && state.slopeSource === 'ign') {
         state.slopeSource = 'calc';
-        if ($('#lySlopes').checked) setSlopes(true);
-        toast('Carte des pentes IGN indisponible : pentes calculées à partir du relief.');
+        if (state.slopes) setSlopes(true);
       }
     });
-
     map.on('load', () => {
       addDataLayers();
+      if (dom) applyDomain(dom, false);
       loadOSM();
       loadRoutes();
+      // Ouverture directement en 3D, cadrée sur le domaine
+      setTimeout(() => set3D(true, true), 300);
     });
     map.on('click', onMapClick);
+    map.once('movestart', () => { const h = $('#hint'); h.style.opacity = '0'; setTimeout(() => h.classList.add('hidden'), 700); });
     return map;
+  }
+
+  function boundsFor(ring, marginM) {
+    const b = L.polyBBox(L.bufferHull(ring, marginM));
+    return [[b.west, b.south], [b.east, b.north]];
   }
 
   function addDataLayers() {
     const map = state.map;
     const empty = { type: 'FeatureCollection', features: [] };
-    ['pistes', 'lifts', 'freeride', 'routes', 'selected', 'access'].forEach(id => map.addSource(id, { type: 'geojson', data: empty }));
+    ['mask', 'maskSoft', 'pistes', 'lifts', 'freeride', 'routes', 'selected', 'access'].forEach(id => map.addSource(id, { type: 'geojson', data: empty }));
+    // Masque : seul le domaine et ses abords restent visibles
+    map.addLayer({ id: 'maskSoft', type: 'fill', source: 'maskSoft', paint: { 'fill-color': '#dfe6ec', 'fill-opacity': 0.55 } });
+    map.addLayer({ id: 'mask', type: 'fill', source: 'mask', paint: { 'fill-color': '#dfe6ec', 'fill-opacity': 0.97 } });
     const diffColor = ['match', ['get', 'difficulty'], ['novice', 'easy'], '#1e9e4a', 'intermediate', '#1f6feb', 'advanced', '#e3261b', 'expert', '#111111', '#7a8796'];
-    map.addLayer({ id: 'pistes-casing', type: 'line', source: 'pistes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#fff', 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 2.5, 15, 7], 'line-opacity': 0.8 } });
-    map.addLayer({ id: 'pistes', type: 'line', source: 'pistes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': diffColor, 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 1.5, 15, 4.5] } });
-    map.addLayer({ id: 'freeride', type: 'line', source: 'freeride', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ff7a00', 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 1.5, 15, 4], 'line-dasharray': [2, 1.5] } });
-    map.addLayer({ id: 'lifts', type: 'line', source: 'lifts', paint: { 'line-color': '#14202e', 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 1.2, 15, 3] } });
+    map.addLayer({ id: 'pistes-casing', type: 'line', source: 'pistes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#fff', 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2.5, 15, 8], 'line-opacity': 0.85 } });
+    map.addLayer({ id: 'pistes', type: 'line', source: 'pistes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': diffColor, 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.6, 15, 5] } });
+    map.addLayer({ id: 'freeride', type: 'line', source: 'freeride', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ff6a00', 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.8, 15, 4.5], 'line-dasharray': [2, 1.5] } });
+    map.addLayer({ id: 'lifts', type: 'line', source: 'lifts', paint: { 'line-color': '#101a26', 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.3, 15, 3.2] } });
     map.addLayer({ id: 'routes', type: 'circle', source: 'routes', paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 4, 15, 9], 'circle-color': '#ff7a00', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
-    map.addLayer({ id: 'selected-line', type: 'line', source: 'selected', filter: ['!=', '$type', 'Point'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#00e5ff', 'line-width': 7, 'line-opacity': 0.75 } });
-    map.addLayer({ id: 'access-line', type: 'line', source: 'access', filter: ['!=', '$type', 'Point'], paint: { 'line-color': '#7b2cff', 'line-width': 3, 'line-dasharray': [1, 1.2] } });
-    map.addLayer({ id: 'access-pts', type: 'circle', source: 'access', filter: ['==', '$type', 'Point'], paint: { 'circle-radius': 7, 'circle-color': ['match', ['get', 'role'], 'start', '#ff7a00', '#7b2cff'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
-    ['pistes', 'freeride', 'lifts', 'routes'].forEach(id => {
-      map.on('mouseenter', id, () => map.getCanvas().style.cursor = 'pointer');
-      map.on('mouseleave', id, () => map.getCanvas().style.cursor = '');
-    });
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 15, 11], 'circle-color': '#ff6a00', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5 } });
+    map.addLayer({ id: 'selected-line', type: 'line', source: 'selected', filter: ['!=', '$type', 'Point'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#00e5ff', 'line-width': 8, 'line-opacity': 0.8 } });
+    map.addLayer({ id: 'access-line', type: 'line', source: 'access', filter: ['!=', '$type', 'Point'], paint: { 'line-color': '#7b2cff', 'line-width': 4, 'line-dasharray': [1, 1.2] } });
+    map.addLayer({ id: 'access-pts', type: 'circle', source: 'access', filter: ['==', '$type', 'Point'], paint: { 'circle-radius': 9, 'circle-color': ['match', ['get', 'role'], 'start', '#ff6a00', 'pin', '#101a26', '#7b2cff'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 3 } });
   }
 
-  // ------------------------------------------------------------------ Chargement des pistes et remontées (OpenStreetMap)
+  // Contour du domaine -> masque, limites de déplacement
+  function applyDomain(hull, fly) {
+    const map = state.map;
+    state.domain = hull;
+    state.ring = L.bufferHull(hull, 2500);
+    map.getSource('maskSoft').setData(L.maskPolygon(L.bufferHull(hull, 1200)));
+    map.getSource('mask').setData(L.maskPolygon(state.ring));
+    map.setMaxBounds(boundsFor(hull, 9000));
+    if (fly) frameDomain(state.is3d);
+  }
+  function frameDomain(threeD) {
+    const ring = state.ring || L.bufferHull([[L.BBOX.west, L.BBOX.south], [L.BBOX.east, L.BBOX.south], [L.BBOX.east, L.BBOX.north], [L.BBOX.west, L.BBOX.north]], 0);
+    const b = L.polyBBox(ring);
+    const cam = state.map.cameraForBounds([[b.west, b.south], [b.east, b.north]], { padding: { top: 90, bottom: 30, left: 10, right: 80 } });
+    if (!cam) return;
+    const opts = { center: cam.center, zoom: cam.zoom + (threeD ? 0.9 : 0), pitch: threeD ? 62 : 0, bearing: threeD ? 200 : 0, duration: 1200, freezeElevation: true };
+    if (threeD && typeof state.map.getCenterElevation === 'function') {
+      const g = state.map.queryTerrainElevation(cam.center);
+      if (Number.isFinite(g)) opts.elevation = g;
+    }
+    state.map.easeTo(opts);
+  }
+
+  // Quelques sommets repères, affichés comme étiquettes
+  function showPeaks() {
+    (state.peakMarkers || []).forEach(m => m.remove());
+    state.peakMarkers = [];
+    if (!state.data || !state.layers.peaks) return;
+    const list = L.pickPeaks(state.data.peaks.features, state.ring, 9, 3500);
+    for (const f of list) {
+      const el = document.createElement('div');
+      el.className = 'peak';
+      el.innerHTML = `<div class="pl"><b>${esc(f.properties.name)}</b><small>${f.properties.ele.toLocaleString('fr-FR')} m</small></div><div class="tri"></div>`;
+      el.addEventListener('click', ev => { ev.stopPropagation(); showPeak(f); });
+      state.peakMarkers.push(new maplibregl.Marker({ element: el, anchor: 'bottom', opacityWhenCovered: '0' }).setLngLat(f.geometry.coordinates).addTo(state.map));
+    }
+  }
+
+  // ------------------------------------------------------------------ Chargement des pistes, remontées et sommets (OpenStreetMap)
   async function loadOSM() {
-    const cached = await cacheGet('osm', 7 * 864e5);
+    const cached = await cacheGet('osm2', 7 * 864e5);
     if (cached) applyOSM(cached.json);
     if (cached && cached.fresh) return;
     const body = 'data=' + encodeURIComponent(L.overpassQuery(L.BBOX));
@@ -242,10 +316,10 @@
       try {
         const json = await fetchJSON(url, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, 90000);
         if (!json.elements || !json.elements.length) throw new Error('vide');
-        await cachePut('osm', json);
+        await cachePut('osm2', json);
         applyOSM(json);
         return;
-      } catch (e) { /* on essaie le serveur suivant */ }
+      } catch (e) { /* serveur suivant */ }
     }
     if (!cached) toast('Impossible de charger les pistes (réseau ?). Réessaie plus tard.', 6000);
   }
@@ -256,6 +330,13 @@
     map.getSource('pistes').setData(d.pistes);
     map.getSource('freeride').setData(d.freeride);
     map.getSource('lifts').setData(d.lifts);
+    const hull = L.domainFrom(d);
+    if (hull) {
+      const first = !store.get('domain', null);
+      store.set('domain', hull);
+      applyDomain(hull, first);
+    }
+    showPeaks();
   }
 
   // ------------------------------------------------------------------ Itinéraires hors-piste (Camptocamp)
@@ -290,23 +371,58 @@
     state.map.getSource('routes').setData(fc);
   }
 
-  // ------------------------------------------------------------------ Clic sur la carte -> fiche détail
+  // ------------------------------------------------------------------ Toucher la carte -> fiche détail, ou pente du point touché
   function onMapClick(e) {
     const map = state.map;
-    const pad = 10;
+    const pad = 16; // zone de toucher généreuse (gants)
     const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
     const layers = ['routes', 'lifts', 'freeride', 'pistes'].filter(id => map.getLayer(id) && map.getLayoutProperty(id, 'visibility') !== 'none');
     const feats = map.queryRenderedFeatures(box, { layers });
-    if (!feats.length) return;
+    if (!feats.length) return showPoint([e.lngLat.lng, e.lngLat.lat]);
     const order = { routes: 0, freeride: 1, lifts: 2, pistes: 3 };
     feats.sort((a, b) => order[a.layer.id] - order[b.layer.id]);
     const f = feats[0];
-    // Récupère la géométrie complète (celle rendue peut être coupée par les tuiles)
     const p = f.properties;
     let full = null;
     if (p.kind === 'route') full = state.routes.features.find(x => x.properties.id === p.id);
     else if (state.data) full = [...state.data.pistes.features, ...state.data.freeride.features, ...state.data.lifts.features].find(x => x.properties.id === p.id);
     showDetail(full || f);
+  }
+
+  // Pente, orientation et altitude à l'endroit touché
+  async function showPoint(pt) {
+    const id = 'pt' + pt.join(',');
+    state.selected = id;
+    state.map.getSource('selected').setData({ type: 'FeatureCollection', features: [] });
+    state.map.getSource('access').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: pt }, properties: { role: 'pin' } }] });
+    openSheet('<p class="muted">Calcul de la pente…</p>');
+    const d = 20; // mètres
+    const dLng = d / (111320 * Math.cos(pt[1] * Math.PI / 180)), dLat = d / 110540;
+    const [z0, zE, zW, zN, zS] = await elevations([pt, [pt[0] + dLng, pt[1]], [pt[0] - dLng, pt[1]], [pt[0], pt[1] + dLat], [pt[0], pt[1] - dLat]]);
+    if (state.selected !== id) return;
+    if (![z0, zE, zW, zN, zS].every(Number.isFinite)) { openSheet('<h2>Point touché</h2><p>Relief indisponible ici (pas de réseau ?).</p>'); return; }
+    const sa = L.slopeAspect(zE, zW, zN, zS, d);
+    const s = Math.round(sa.slope);
+    const col = s >= 45 ? '#b0369f' : s >= 40 ? '#e3001b' : s >= 35 ? '#ff8c00' : s >= 30 ? '#f2e600' : '#cfe8c4';
+    const txt = s >= 50
+      ? `<div class="note red"><b>Pente de ${s}°</b> : terrain extrême (souvent rocheux ou barres). Une chute y devient une glissade incontrôlable.</div>`
+      : s >= 30
+      ? `<div class="note ${s >= 35 ? 'red' : ''}"><b>Pente de ${s}°</b> : ${s >= 35 ? 'c’est la zone où partent le plus d’avalanches.' : 'une avalanche peut partir à partir de 30°.'} Compare l'orientation (${L.cardinal(sa.aspect)}) avec celles citées dans le bulletin du jour.</div>`
+      : '<p>Pente modérée : peu de risque qu’une avalanche parte <b>ici</b>, mais attention aux pentes raides au-dessus.</p>';
+    const r = riskToday();
+    openSheet(`<h2>📍 Ici</h2>
+      <div class="hero"><div class="num" style="background:${col};color:${s >= 40 ? '#fff' : '#101a26'}">${s}°</div>
+        <div><p><b>Altitude ${Math.round(z0).toLocaleString('fr-FR')} m</b></p><p>Pente orientée <b>${L.cardinal(sa.aspect)}</b></p>${r ? `<p class="small">Risque du jour : <b>${r.level}/5</b></p>` : ''}</div></div>
+      ${txt}
+      <p class="muted small">Calculé sur un modèle de terrain d'environ 30 m : localement, ça peut être plus raide (rochers, corniches).</p>
+      ${natureHTML(z0)}`);
+  }
+
+  async function showPeak(f) {
+    const p = f.properties;
+    state.selected = p.id;
+    openSheet(`<h2>⛰️ ${esc(p.name)}</h2><div class="stats">${statBox(p.ele.toLocaleString('fr-FR') + ' m', 'Altitude')}</div>${natureHTML(p.ele)}
+      <p class="muted small">Sommet repère (OpenStreetMap).</p>`);
   }
 
   function openSheet(html, tall) {
@@ -413,7 +529,7 @@
       `<div class="block"><h3>🎟️ Forfaits qui donnent accès à cette remontée</h3>
        <p class="muted small">Secteur : ${esc(L.SECTOR_LABEL[sec])}. Il n'y a pas de ticket à l'unité : on paie un forfait.</p>
        ${groups.map(g => `<p><b>${esc(g.title)}</b><br>${g.rows.slice(0, 2).map(r => `${esc(r[0])} : <b>${esc(r[1])}</b>`).join('<br>')}</p>`).join('')}
-       <button class="btn secondary small" data-goto="forfaits">Voir tous les prix</button></div>` +
+       <button class="btn secondary block" data-goto="forfaits">Voir tous les prix</button></div>` +
       natureHTML(Number.isFinite(elB) ? Math.max(elA, elB) : null) + sourceOSM(p);
   }
 
@@ -428,7 +544,9 @@
         ${p.elevation_max ? statBox(p.elevation_max + ' m', 'Point le plus haut') : ''}
         ${p.height_diff_down ? statBox(p.height_diff_down + ' m', 'Dénivelé de descente') : ''}
       </div>
+      <div class="actions"><button class="btn" id="goAccess">🧭 Y aller</button><button class="btn danger" data-goto="position">📍 Prévenir</button></div>
       <div id="rMore"><p class="muted small">Chargement du tracé et de la description…</p></div>`, true);
+    $('#goAccess').onclick = () => { const b = $('#accessBox'); if (b && b.firstChild) b.scrollIntoView({ behavior: 'smooth' }); else toast('Calcul de l\u2019accès en cours…'); };
     let doc = null;
     try { doc = await fetchJSON(`${URLS.c2c}/routes/${p.c2c}?cook=fr`); }
     catch (e) { const c = await cacheGet('c2c-' + p.c2c, 1e12); doc = c && c.json; }
@@ -531,7 +649,7 @@
     box.innerHTML = `<div class="block"><h3>🧭 Comment rejoindre le départ</h3><ol class="steps">${steps.map(s => `<li>${s}</li>`).join('')}</ol>
       ${alt2 ? `<p class="small muted">Autre possibilité : ${esc(alt2.f.properties.label)} « ${esc(alt2.f.properties.name || 'sans nom')} » (départ à ≈ ${L.fmtDist(alt2.dist)} de son arrivée).</p>` : ''}
       <div class="note">Ces indications sont <b>calculées automatiquement</b> à partir de la carte (remontée la plus proche, distance et direction). Le passage réel peut devoir contourner des rochers ou des barres : regarde la carte des pentes et ne t'engage jamais dans une pente que tu ne vois pas jusqu'en bas.</div>
-      <button class="btn secondary small" id="showAccess">Voir le trajet sur la carte</button></div>`;
+      <button class="btn block" id="showAccess">🗺️ Voir le trajet sur la carte</button></div>`;
     const accessFC = { type: 'FeatureCollection', features: [
       { type: 'Feature', geometry: { type: 'LineString', coordinates: [best.top.pt, start] }, properties: {} },
       { type: 'Feature', geometry: { type: 'Point', coordinates: best.top.pt }, properties: { role: 'lift' } },
@@ -540,7 +658,7 @@
     state.map.getSource('access').setData(accessFC);
     $('#showAccess').onclick = () => {
       const b = new maplibregl.LngLatBounds(best.top.pt, best.top.pt); b.extend(start);
-      state.map.fitBounds(b, { padding: { top: 80, bottom: window.innerHeight * 0.5, left: 40, right: 70 }, maxZoom: 15.5 });
+      state.map.fitBounds(b, { padding: { top: 80, bottom: window.innerHeight * 0.5, left: 40, right: 70 }, maxZoom: 15.5, freezeElevation: true });
     };
   }
 
@@ -609,27 +727,24 @@
     const pl = wxPlace();
     body.innerHTML = '<p class="muted">Chargement des prévisions…</p>';
     const alt = await elevAt(pl.lng, pl.lat).catch(() => NaN);
-    let d;
+    let d, offline = false;
     try { d = await getWeather(pl.lng, pl.lat, alt); }
     catch (e) {
       const c = await cacheGet('wx-last', 1e12);
       if (!c) { body.innerHTML = '<div class="card"><p>Prévisions indisponibles (pas de réseau ?).</p></div>'; return; }
-      d = c.json; body.insertAdjacentHTML('afterbegin', '<div class="note">Hors-ligne : dernières prévisions enregistrées.</div>');
+      d = c.json; offline = true;
     }
     state.wx = d; const s = wxSummary(d); state.wxSum = s;
     updateWxChip(d, s);
-    const H = d.hourly;
-    let rows = '';
-    for (let i = s.next.from; i < s.next.to; i++) {
-      const t = new Date(H.time[i]);
+    const H = d.hourly; const c = s.cur;
+    const w0 = WMO[H.weather_code[c]] || ['🌡️', ''];
+    const vis = i => H.visibility && H.visibility[i] != null ? (H.visibility[i] >= 10000 ? '> 10 km' : L.fmtDist(H.visibility[i])) : '—';
+    let hours = '';
+    for (let i = s.next.from + 1; i < Math.min(s.next.to + 1, H.time.length); i++) {
       const w = WMO[H.weather_code[i]] || ['', ''];
-      const vis = H.visibility && H.visibility[i] != null ? (H.visibility[i] >= 10000 ? '>10 km' : L.fmtDist(H.visibility[i])) : '—';
-      rows += `<tr><td>${t.getHours()}h</td><td title="${w[1]}">${w[0]}</td><td>${Math.round(H.temperature_2m[i])}°<br><span class="muted small">${H.apparent_temperature ? Math.round(H.apparent_temperature[i]) + '°' : ''}</span></td>
-        <td>${Math.round(H.wind_speed_10m[i])} ${arrow(H.wind_direction_10m && H.wind_direction_10m[i])}<br><span class="muted small">raf. ${Math.round(H.wind_gusts_10m[i])}</span></td>
-        <td>${H.snowfall && H.snowfall[i] ? H.snowfall[i].toFixed(1).replace('.', ',') + ' cm' : '—'}</td><td class="small">${vis}</td>
-        <td class="small">${H.freezing_level_height && H.freezing_level_height[i] != null ? Math.round(H.freezing_level_height[i] / 50) * 50 + ' m' : '—'}</td></tr>`;
+      const bad = (H.wind_gusts_10m[i] >= 60) || (H.visibility && H.visibility[i] != null && H.visibility[i] < 300) || (H.snowfall && H.snowfall[i] >= 2);
+      hours += `<div class="hour ${bad ? 'bad' : ''}">${new Date(H.time[i]).getHours()}h<div class="e">${w[0]}</div><b>${Math.round(H.temperature_2m[i])}°</b>💨 ${Math.round(H.wind_gusts_10m[i])}<br>${H.snowfall && H.snowfall[i] ? '❄️ ' + H.snowfall[i].toFixed(1).replace('.', ',') : '&nbsp;'}</div>`;
     }
-    // Barres par quart d'heure
     let bars = '';
     const M = d.minutely_15;
     if (M && M.time) {
@@ -637,25 +752,36 @@
       const ids = M.time.map((t, i) => [new Date(t).getTime(), i]).filter(([t]) => t >= now - 15 * 60e3).slice(0, 20).map(x => x[1]);
       const vals = ids.map(i => (M.snowfall && M.snowfall[i]) || (M.precipitation && M.precipitation[i] / 10) || 0);
       const max = Math.max(0.5, ...vals);
-      if (ids.length) bars = `<div class="card"><h3>Neige / pluie par quart d'heure</h3><div class="bars">${vals.map(v => `<div style="height:${Math.round(v / max * 100)}%"></div>`).join('')}</div>
-        <div class="bars-x"><span>${new Date(M.time[ids[0]]).getHours()}h${String(new Date(M.time[ids[0]]).getMinutes()).padStart(2, '0')}</span><span>+5 h</span></div>
+      if (ids.length) bars = `<div class="card"><h3>Neige / pluie, quart d'heure par quart d'heure</h3><div class="bars">${vals.map(v => `<div style="height:${Math.round(v / max * 100)}%"></div>`).join('')}</div>
+        <div class="bars-x"><span>maintenant</span><span>+5 h</span></div>
         <p class="muted small">${vals.some(v => v > 0) ? 'Maximum : ' + max.toFixed(1).replace('.', ',') + ' cm de neige en 15 min (ou équivalent en pluie).' : 'Pas de précipitation prévue.'}</p></div>`;
     }
     const snow = L.estimateSnow(s);
     const al = L.weatherAlerts(s);
-    body.innerHTML = `<div class="card"><h3>📍 ${esc(pl.label)}${Number.isFinite(alt) ? ` — ${Math.round(alt)} m` : ''}</h3>
-      <p class="muted small">Prévision Météo-France (modèle AROME) recalculée à cette altitude. Change de lieu en déplaçant la carte ou en activant ta position.</p>
-      <table class="wx"><thead><tr><th>Heure</th><th></th><th>Temp.<br>ressenti</th><th>Vent km/h</th><th>Neige</th><th>Visib.</th><th>Limite 0°</th></tr></thead><tbody>${rows}</tbody></table></div>
+    body.innerHTML = (offline ? '<div class="note">Hors-ligne : dernières prévisions enregistrées.</div>' : '') +
+      (al.length ? `<div class="card" style="border:3px solid #e3261b"><h3>⚠️ À surveiller</h3>${al.map(a => `<div class="alert"><span class="lv" style="background:${['', '#ffe14d', '#ff9a2e', '#e3261b'][a.lvl]}"></span><span>${esc(a.t)}</span></div>`).join('')}</div>` : '') +
+      `<div class="card"><div class="now"><span class="ic">${w0[0]}</span><span class="t">${Math.round(H.temperature_2m[c])}°</span>
+        <span><b>${esc(w0[1])}</b> · ressenti ${H.apparent_temperature ? Math.round(H.apparent_temperature[c]) + '°' : '—'}</span></div>
+        <div class="kv" style="margin-top:12px">
+          <span>Vent / rafales</span><b>${Math.round(H.wind_speed_10m[c])} / ${Math.round(H.wind_gusts_10m[c])} km/h ${arrow(H.wind_direction_10m && H.wind_direction_10m[c])}</b>
+          <span>Visibilité</span><b>${vis(c)}</b>
+          <span>Limite pluie-neige (0°)</span><b>${H.freezing_level_height && H.freezing_level_height[c] != null ? Math.round(H.freezing_level_height[c] / 50) * 50 + ' m' : '—'}</b>
+          <span>Neige fraîche 24 h / 3 j</span><b>${s.fresh24.toFixed(0)} / ${s.fresh72.toFixed(0)} cm</b>
+        </div>
+        <div class="hours">${hours}</div>
+        <p class="muted small">📍 ${esc(pl.label)}${Number.isFinite(alt) ? ` — ${Math.round(alt)} m` : ''} · Météo-France (AROME) via Open-Meteo, recalculé à cette altitude. Les cases rouges signalent vent fort, jour blanc ou grosse chute de neige.</p></div>
       ${bars}
-      ${al.length ? `<div class="card"><h3>⚠️ À surveiller</h3>${al.map(a => `<div class="alert"><span class="lv" style="background:${['', '#ffe14d', '#ff9a2e', '#e3261b'][a.lvl]}"></span><span>${esc(a.t)}</span></div>`).join('')}</div>` : ''}
-      <div class="card"><h3>❄️ Neige probable (estimation)</h3><p><b>${esc(snow.label)}</b></p>${snow.notes.map(n => `<p class="small">${esc(n)}</p>`).join('')}
-      <p class="muted small">Neige tombée : ${s.fresh24.toFixed(0)} cm en 24 h, ${s.fresh72.toFixed(0)} cm en 3 jours. Estimation faite à partir de la météo, pas une observation sur place.</p></div>
-      <p class="muted small">Source : <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>, données Météo-France.</p>`;
+      <div class="card"><h3>❄️ Neige probable</h3><p><b>${esc(snow.label)}</b></p>${snow.notes.map(n => `<p class="small">${esc(n)}</p>`).join('')}
+      <p class="muted small">Estimation à partir de la météo des derniers jours, pas une observation sur place.</p></div>`;
   }
 
   function updateWxChip(d, s) {
     const H = d.hourly; const i = s.cur; const w = WMO[H.weather_code[i]] || ['🌡️', ''];
-    $('#wxText').textContent = `${w[0]} ${Math.round(H.temperature_2m[i])}° · vent ${Math.round(H.wind_gusts_10m[i])} km/h`;
+    $('#wxIcon').textContent = w[0];
+    $('#wxMain').textContent = `${Math.round(H.temperature_2m[i])}° · ${esc(w[1])}`;
+    const al = L.weatherAlerts(s);
+    $('#wxSub').textContent = `rafales ${Math.round(H.wind_gusts_10m[i])} km/h` + (al.some(a => a.lvl >= 2) ? ' ⚠️' : '');
+    $('#wxIcon').style.background = al.some(a => a.lvl >= 3) ? '#ffd9d6' : al.some(a => a.lvl >= 2) ? '#ffecd2' : '#e3e8ee';
   }
 
   async function snowFor(pt, alt) {
@@ -683,12 +809,15 @@
   }
   function updateRiskChip() {
     const r = riskToday();
+    const num = $('#riskNum');
     if (r && L.RISK[r.level]) {
-      $('#riskDot').style.background = L.RISK[r.level].color;
-      $('#riskText').textContent = `Avalanche ${r.level}/5 · ${L.RISK[r.level].name}`;
+      num.textContent = r.level; num.style.background = L.RISK[r.level].color; num.style.color = r.level >= 4 ? '#fff' : '#101a26';
+      $('#riskName').textContent = `Risque ${L.RISK[r.level].name.toLowerCase()}`;
+      $('#riskSub').textContent = r.src && /Bulletin/.test(r.src) ? 'bulletin officiel' : 'saisi aujourd’hui';
     } else {
-      $('#riskDot').style.background = '#bbb';
-      $('#riskText').textContent = 'Risque avalanche ?';
+      num.textContent = '?'; num.style.background = '#e3e8ee'; num.style.color = '#101a26';
+      $('#riskName').textContent = 'Avalanche';
+      $('#riskSub').textContent = 'saisir le niveau';
     }
   }
 
@@ -720,7 +849,7 @@
     const info = lvl ? L.RISK[lvl] : null;
     body.innerHTML = `
       <div class="card"><h3>🏔️ Risque d'avalanche aujourd'hui (massif de la Vanoise)</h3>
-        <div class="risk-big">${info ? `<div class="num" style="background:${info.color};color:${lvl >= 4 ? '#fff' : '#14202e'}">${lvl}</div><div><b>${info.name}</b>${r.src ? `<br><span class="muted small">${esc(r.src)}</span>` : ''}</div>` : '<div class="num" style="background:#e3e8ee">?</div><div>Pas encore renseigné aujourd’hui.</div>'}</div>
+        <div class="hero">${info ? `<div class="num" style="background:${info.color};color:${lvl >= 4 ? '#fff' : '#14202e'}">${lvl}</div><div><b>${info.name}</b>${r.src ? `<br><span class="muted small">${esc(r.src)}</span>` : ''}</div>` : '<div class="num" style="background:#e3e8ee">?</div><div>Pas encore renseigné aujourd’hui.</div>'}</div>
         ${info ? `<p class="small" style="margin-top:10px">${esc(info.advice)}</p>` : ''}
         <div id="beraBox"></div>
         <p class="small" style="margin-top:12px"><b>Saisir le niveau du jour</b> (affiché sur le drapeau en bas des pistes, aux caisses ou dans le bulletin) :</p>
@@ -743,7 +872,7 @@
       <details class="card"><summary><b>Réglage avancé : bulletin automatique (clé Météo-France)</b></summary>
         <p class="small">Si tu crées un compte gratuit sur <a href="https://portail-api.meteofrance.fr" target="_blank" rel="noopener">portail-api.meteofrance.fr</a> et t'abonnes à l'API « Bulletin de risque d'avalanche », colle ta clé ici : l'appli essaiera de lire le bulletin toute seule.</p>
         <input type="password" id="beraKey" placeholder="clé API" value="${esc(store.get('beraKey', ''))}">
-        <button class="btn secondary small" id="beraSave">Enregistrer et tester</button>
+        <button class="btn secondary block" id="beraSave">Enregistrer et tester</button>
         <p class="muted small" id="beraMsg"></p>
       </details>
       <p class="muted small">Il n'existe pas de flux public des accidents ou incidents en temps réel : pour les fermetures de secteurs, regarde les panneaux et écoute les pisteurs.</p>`;
@@ -812,12 +941,12 @@
       PRICES.groups.map(g => `<div class="card"><h3>${esc(g.title)}</h3>
         ${g.rows.map(r => `<div class="price-row"><span>${esc(r[0])}${r[2] ? `<br><span class="muted small">${esc(r[2])}</span>` : ''}</span><b>${esc(r[1])}</b></div>`).join('')}
         <p class="muted small">Source : ${g.src.map(s => `<a href="${s[1]}" target="_blank" rel="noopener">${esc(s[0])}</a>`).join(', ')}</p></div>`).join('') +
-      `<div class="card"><h3>Sites officiels</h3>
-        <a class="btn secondary small" href="https://www.les3vallees.com" target="_blank" rel="noopener">les3vallees.com</a>
-        <a class="btn secondary small" href="https://www.courchevel.com" target="_blank" rel="noopener">Courchevel</a>
-        <a class="btn secondary small" href="https://www.meribel.net" target="_blank" rel="noopener">Méribel</a>
-        <a class="btn secondary small" href="https://www.valthorens.com" target="_blank" rel="noopener">Val Thorens</a>
-        <a class="btn secondary small" href="https://lesmenuires.com" target="_blank" rel="noopener">Les Menuires</a></div>`;
+      `<div class="card"><h3>Sites officiels</h3><div class="grid2">
+        <a class="btn secondary" href="https://www.les3vallees.com" target="_blank" rel="noopener">les3vallees.com</a>
+        <a class="btn secondary" href="https://www.courchevel.com" target="_blank" rel="noopener">Courchevel</a>
+        <a class="btn secondary" href="https://www.meribel.net" target="_blank" rel="noopener">Méribel</a>
+        <a class="btn secondary" href="https://www.valthorens.com" target="_blank" rel="noopener">Val Thorens</a>
+        <a class="btn secondary" href="https://lesmenuires.com" target="_blank" rel="noopener">Les Menuires</a></div></div>`;
   }
 
   // ------------------------------------------------------------------ Partage de position
@@ -842,7 +971,7 @@
         <div id="posOut">${msg || ''}</div>
       </div>
       <div class="card"><h3>Personnes à prévenir</h3>
-        ${contacts.length ? contacts.map((c, i) => `<div class="contact"><div class="who">${esc(c.name || 'Contact')}<small>${esc(c.to)}</small></div><button class="btn secondary small" data-del="${i}">Supprimer</button></div>`).join('') : '<p class="muted small">Aucun contact pour l’instant.</p>'}
+        ${contacts.length ? contacts.map((c, i) => `<div class="contact"><div class="who">${esc(c.name || 'Contact')}<small>${esc(c.to)}</small></div><button class="btn secondary" data-del="${i}">Supprimer</button></div>`).join('') : '<p class="muted small">Aucun contact pour l’instant.</p>'}
         <div style="margin-top:10px"><input type="text" id="cName" placeholder="Nom (ex. Thibaud)" autocomplete="name">
         <div style="height:8px"></div><input type="text" id="cTo" placeholder="Numéro de téléphone ou adresse mail" inputmode="email" autocomplete="off">
         <button class="btn block" id="cAdd">Ajouter</button></div>
@@ -874,7 +1003,7 @@
           <p class="muted small">Le message s'ouvre dans Messages ou Mail : il faut encore appuyer sur « Envoyer ».</p>`;
         $('#sharePos').onclick = () => { if (navigator.share) navigator.share({ text }).catch(() => {}); else toast('Partage non disponible ici : utilise Copier.'); };
         $('#copyPos').onclick = () => navigator.clipboard.writeText(text).then(() => toast('Copié ✔'), () => toast('Copie impossible'));
-        state.map.flyTo({ center: [pos.lon, pos.lat], zoom: Math.max(state.map.getZoom(), 14) });
+        state.map.flyTo({ center: [pos.lon, pos.lat], zoom: Math.max(state.map.getZoom(), 14), freezeElevation: true });
       } catch (e) {
         out.innerHTML = `<div class="note red">Impossible d'obtenir la position (${esc(e.message)}). Sur iPhone : Réglages › Confidentialité › Service de localisation › Safari (ou l'appli) › « Lorsque l'app est active ».</div>`;
       }
@@ -884,60 +1013,101 @@
   // ------------------------------------------------------------------ Calques, 3D, navigation
   function setSlopes(on) {
     const map = state.map;
+    state.slopes = on;
     map.setLayoutProperty('slopesIgn', 'visibility', on && state.slopeSource === 'ign' ? 'visible' : 'none');
     map.setLayoutProperty('slopesCalc', 'visibility', on && state.slopeSource === 'calc' ? 'visible' : 'none');
     $('#slopeLegend').classList.toggle('hidden', !on);
+    $('#btnSlopes').classList.toggle('on', on);
   }
-  function setup3D() {
-    const btn = $('#btn3d');
-    btn.onclick = () => {
-      const map = state.map;
-      state.is3d = !state.is3d;
-      if (state.is3d) {
-        map.setTerrain({ source: 'dem', exaggeration: 1.2 });
-        // On attend que le relief soit chargé, puis on place la caméra au-dessus du sol réel
-        // (sinon elle reste calée sur l'altitude 0 et peut se retrouver « dans » la montagne)
-        const tilt = () => {
-          const ground = map.queryTerrainElevation(map.getCenter());
-          const opts = { pitch: 60, duration: 900 };
-          if (Number.isFinite(ground) && typeof map.getCenterElevation === 'function') opts.elevation = ground;
-          map.easeTo(opts);
-        };
-        let done = false;
-        const once = () => { if (done) return; done = true; tilt(); };
-        map.once('idle', once); setTimeout(once, 2500);
-        btn.textContent = '2D'; btn.classList.add('on');
-        toast('Vue 3D : glisse avec deux doigts vers le haut ou le bas pour incliner, tourne avec deux doigts.');
-      } else {
-        const back = { pitch: 0, bearing: 0, duration: 700 };
-        if (typeof map.getCenterElevation === 'function') back.elevation = 0;
-        map.easeTo(back);
-        setTimeout(() => map.setTerrain(null), 720);
-        btn.textContent = '3D'; btn.classList.remove('on');
-      }
-    };
-  }
-  function setupLayers() {
+
+  function set3D(on, frame) {
     const map = state.map;
-    $('#btnLayers').onclick = () => $('#layersMenu').classList.toggle('hidden');
-    document.querySelectorAll('input[name=base]').forEach(r => r.onchange = () => {
-      map.setLayoutProperty('plan', 'visibility', r.value === 'plan' && r.checked ? 'visible' : 'none');
-      map.setLayoutProperty('ortho', 'visibility', r.value === 'ortho' && r.checked ? 'visible' : 'none');
-    });
-    $('#lyPistes').onchange = e => ['pistes-casing', 'pistes', 'lifts'].forEach(id => map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none'));
-    $('#lyOff').onchange = e => ['freeride', 'routes'].forEach(id => map.setLayoutProperty(id, 'visibility', e.target.checked ? 'visible' : 'none'));
-    $('#lySlopes').onchange = e => setSlopes(e.target.checked);
-    $('#lyTraces').onchange = e => map.setLayoutProperty('traces', 'visibility', e.target.checked ? 'visible' : 'none');
-    $('#btnLocate').onclick = () => state.geo.trigger();
+    state.is3d = on;
+    $('#lbl3d').textContent = on ? '3D' : '2D';
+    $('#btn3d').classList.toggle('on', on);
+    if (on) {
+      map.setTerrain({ source: 'dem', exaggeration: 1.5 });
+      // On attend que le relief soit chargé, puis on place la caméra au-dessus du sol réel
+      let done = false;
+      const go = () => {
+        if (done) return; done = true;
+        if (frame) return frameDomain(true);
+        const opts = { pitch: 62, duration: 900, freezeElevation: true };
+        const g = map.queryTerrainElevation(map.getCenter());
+        if (Number.isFinite(g) && typeof map.getCenterElevation === 'function') opts.elevation = g;
+        map.easeTo(opts);
+      };
+      map.once('idle', go); setTimeout(go, 2500);
+    } else {
+      const back = { pitch: 0, bearing: 0, duration: 700, freezeElevation: true };
+      if (typeof map.getCenterElevation === 'function') back.elevation = 0;
+      map.easeTo(back);
+      setTimeout(() => { if (!state.is3d) map.setTerrain(null); }, 720);
+    }
+  }
+
+  const BASES = {
+    relief: { i: '🏔️', name: 'Relief', sub: 'couleurs d’altitude + ombres' },
+    topo: { i: '🗺️', name: 'Topo', sub: 'carte de randonnée' },
+    plan: { i: '🧭', name: 'Plan IGN', sub: 'routes, villages, noms' },
+    ortho: { i: '🛰️', name: 'Photo', sub: 'vue aérienne' }
+  };
+  function setBase(b) {
+    const map = state.map;
+    state.base = b; store.set('base', b);
+    ['plan', 'topo', 'ortho'].forEach(id => map.setLayoutProperty(id, 'visibility', id === b ? 'visible' : 'none'));
+    map.setLayoutProperty('relief', 'visibility', b === 'relief' ? 'visible' : 'none');
+    map.setPaintProperty('hill', 'hillshade-exaggeration', b === 'relief' ? 0.75 : b === 'ortho' ? 0.15 : 0.35);
+    $('#lblBase').textContent = BASES[b].name;
+  }
+  function setLayer(k, on) {
+    const map = state.map;
+    state.layers[k] = on; store.set('layers', state.layers);
+    const ids = { pistes: ['pistes-casing', 'pistes', 'lifts'], off: ['freeride', 'routes'], contours: ['contours', 'contour-labels'], traces: ['traces'] }[k] || [];
+    ids.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none'); });
+    if (k === 'peaks') showPeaks();
+  }
+
+  function openLayers() {
+    state.selected = 'layers';
+    const L2 = state.layers;
+    const tog = (k, i, t, sub) => `<button class="opt ${L2[k] ? 'sel' : ''}" data-ly="${k}"><span class="i">${i}</span><span>${t}<small>${sub}</small></span></button>`;
+    openSheet(`<h2>Carte</h2>
+      <h3 class="sec">Fond de carte</h3>
+      <div class="grid2">${Object.entries(BASES).map(([k, v]) => `<button class="opt ${state.base === k ? 'sel' : ''}" data-base="${k}"><span class="i">${v.i}</span><span>${v.name}<small>${v.sub}</small></span></button>`).join('')}</div>
+      <h3 class="sec">Afficher</h3>
+      <div class="grid2">
+        ${tog('pistes', '⛷️', 'Pistes', 'et remontées')}
+        ${tog('off', '🟠', 'Hors-piste', 'itinéraires connus')}
+        ${tog('peaks', '⛰️', 'Sommets', 'noms et altitudes')}
+        ${tog('contours', '〰️', 'Courbes', 'de niveau')}
+        ${tog('traces', '🥾', 'Traces IGN', 'itinéraires hivernaux')}
+        <button class="opt ${state.slopes ? 'sel' : ''}" data-slopes="1"><span class="i">📐</span><span>Pentes<small>plus de 30°</small></span></button>
+      </div>
+      <button class="btn secondary block" id="btnFrame">🎯 Recadrer sur le domaine</button>
+      <button class="btn secondary block" id="btnOffline">⬇️ Enregistrer la carte pour le hors-ligne</button>
+      <p id="offlineStatus" class="muted small"></p>`);
+    const body = $('#sheetBody');
+    body.querySelectorAll('[data-base]').forEach(b => b.onclick = () => { setBase(b.dataset.base); openLayers(); });
+    body.querySelectorAll('[data-ly]').forEach(b => b.onclick = () => { setLayer(b.dataset.ly, !state.layers[b.dataset.ly]); openLayers(); });
+    body.querySelector('[data-slopes]').onclick = () => { setSlopes(!state.slopes); openLayers(); };
+    $('#btnFrame').onclick = () => { closeSheet(); frameDomain(state.is3d); };
     $('#btnOffline').onclick = offlineDownload;
+  }
+
+  function setupControls() {
+    $('#btn3d').onclick = () => set3D(!state.is3d, false);
+    $('#btnLayers').onclick = () => { if (state.selected === 'layers' && !$('#sheet').classList.contains('hidden')) closeSheet(); else openLayers(); };
+    $('#btnSlopes').onclick = () => setSlopes(!state.slopes);
+    $('#btnLocate').onclick = () => state.geo.trigger();
   }
 
   function openTab(name) {
     document.querySelectorAll('#tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
     document.querySelectorAll('.panel').forEach(p => p.classList.add('hidden'));
-    $('#layersMenu').classList.add('hidden');
     if (name === 'carte') return;
     $('#panel-' + name).classList.remove('hidden');
+    $('#panel-' + name + ' .panel-body').scrollTop = 0;
     if (name === 'meteo') renderMeteo();
     if (name === 'alertes') renderAlertes();
     if (name === 'forfaits') renderForfaits();
@@ -948,28 +1118,30 @@
   async function offlineDownload() {
     const st = $('#offlineStatus');
     const jobs = [];
-    const add = (tpl, zmin, zmax) => { for (let z = zmin; z <= zmax; z++) L.tilesForBbox(L.BBOX, z).forEach(t => jobs.push(tpl.replace('{z}', t.z).replace('{x}', t.x).replace('{y}', t.y))); };
-    const baseTpl = state.base === 'ortho' ? LAYERS_IGN.ortho : LAYERS_IGN.plan;
-    add(baseTpl, 10, 15);
-    add(URLS.dem, 10, 14);
-    if ($('#lySlopes').checked && state.slopeSource === 'ign') add(LAYERS_IGN.slopes, 13, 15);
-    modal(`<h2>Enregistrer la carte ?</h2><p>${jobs.length} morceaux de carte (environ ${Math.round(jobs.length * 25 / 1024)} Mo). À faire en wifi.</p>
-      <p class="small muted">Sans réseau, tu auras la carte, le relief, les pistes et les itinéraires déjà ouverts. La météo et les alertes demandent du réseau.</p>
-      <button class="btn ok" id="dlGo">Enregistrer</button><button class="btn secondary" id="dlNo">Annuler</button>`, card => {
+    const bbox = state.ring ? L.polyBBox(state.ring) : L.BBOX;
+    const add = (tpl, zmin, zmax) => { for (let z = zmin; z <= zmax; z++) L.tilesForBbox(bbox, z).forEach(t => jobs.push(tpl.replace('{z}', t.z).replace('{x}', t.x).replace('{y}', t.y))); };
+    add(URLS.dem, 9, 14); // le relief suffit pour le fond « Relief », les courbes et les pentes
+    if (state.base === 'plan') add(LAYERS_IGN.plan, 10, 15);
+    if (state.base === 'ortho') add(LAYERS_IGN.ortho, 10, 15);
+    if (state.slopes && state.slopeSource === 'ign') add(LAYERS_IGN.slopes, 13, 15);
+    modal(`<h2>Enregistrer la carte ?</h2><p>${jobs.length} morceaux de carte (environ ${Math.max(5, Math.round(jobs.length * 30 / 1024))} Mo). À faire en wifi.</p>
+      <p class="small muted">Sans réseau, tu auras la carte en relief, les pentes, les pistes et les itinéraires. La météo et les alertes demandent du réseau.${state.base === 'topo' ? ' Le fond « Topo » ne s’enregistre pas : utilise « Relief » hors-ligne.' : ''}</p>
+      <button class="btn ok block" id="dlGo">Enregistrer</button><button class="btn secondary block" id="dlNo">Annuler</button>`, card => {
       card.querySelector('#dlNo').onclick = closeModal;
       card.querySelector('#dlGo').onclick = async () => {
         closeModal();
-        let cache; try { cache = await caches.open('3v-tiles'); } catch (e) { st.textContent = 'Stockage indisponible sur cet appareil.'; return; }
-        let done = 0, fail = 0;
+        let cache; try { cache = await caches.open('3v-tiles'); } catch (e) { toast('Stockage indisponible sur cet appareil.'); return; }
+        let done = 0, fail = 0; const total = jobs.length;
+        const show = t => { if (st) st.textContent = t; toast(t, 2500); };
         const worker = async () => {
           while (jobs.length) {
             const u = jobs.shift();
             try { if (!(await cache.match(u))) { const r = await fetch(u, { mode: 'cors' }); if (r.ok) await cache.put(u, r); else fail++; } } catch (e) { fail++; }
-            done++; if (done % 20 === 0) st.textContent = `Enregistrement… ${done} morceaux`;
+            done++; if (done % 50 === 0) show(`Enregistrement… ${Math.round(done / total * 100)} %`);
           }
         };
         await Promise.all([worker(), worker(), worker(), worker()]);
-        st.textContent = `Terminé : ${done - fail} morceaux enregistrés${fail ? `, ${fail} échecs` : ''}.`;
+        show(`Carte enregistrée ✔${fail ? ` (${fail} morceaux manquants)` : ''}`);
       };
     });
   }
@@ -990,24 +1162,28 @@
 
   // ------------------------------------------------------------------ Démarrage
   function start() {
+    state.layers = Object.assign({ pistes: true, off: true, peaks: true, contours: true, traces: false }, store.get('layers', {}));
     initMap();
-    setup3D(); setupLayers();
+    setupControls();
     $('#sheetClose').onclick = closeSheet;
-    document.querySelectorAll('#tabbar button').forEach(b => b.onclick = () => openTab(b.dataset.tab));
+    document.querySelectorAll('#tabbar button').forEach(b => b.onclick = () => {
+      if (b.classList.contains('active')) openTab('carte'); else openTab(b.dataset.tab);
+    });
     document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => openTab('carte'));
-    $('#riskChip').onclick = () => openTab('alertes');
-    $('#wxChip').onclick = () => openTab('meteo');
+    $('#riskTile').onclick = () => openTab('alertes');
+    $('#wxTile').onclick = () => openTab('meteo');
     document.addEventListener('click', e => {
       const g = e.target.closest('[data-goto]'); if (g) openTab(g.dataset.goto);
     });
     updateRiskChip();
     welcome();
-    // Météo d'accueil (centre du domaine) pour la puce du haut
     state.map.once('load', async () => {
+      setBase(store.get('base', 'relief'));
+      Object.entries(state.layers).forEach(([k, v]) => setLayer(k, v));
       try {
         const c = state.map.getCenter(); const alt = await elevAt(c.lng, c.lat).catch(() => NaN);
         const d = await getWeather(c.lng, c.lat, alt); updateWxChip(d, wxSummary(d));
-      } catch (e) { $('#wxText').textContent = 'Météo hors-ligne'; }
+      } catch (e) { $('#wxMain').textContent = 'Météo'; $('#wxSub').textContent = 'hors-ligne'; }
       showBERA(false).catch(() => {});
     });
     if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

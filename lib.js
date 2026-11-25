@@ -124,7 +124,7 @@
   // ---------- OpenStreetMap (Overpass) -> GeoJSON
   L.overpassQuery = function (b) {
     const bb = `${b.south},${b.west},${b.north},${b.east}`;
-    return `[out:json][timeout:90];(way["piste:type"="downhill"](${bb});way["aerialway"]["aerialway"!~"zip_line|pylon|station|goods"](${bb});way["piste:type"="skitour"](${bb}););out tags geom;`;
+    return `[out:json][timeout:90];(way["piste:type"="downhill"](${bb});way["aerialway"]["aerialway"!~"zip_line|pylon|station|goods"](${bb});way["piste:type"="skitour"](${bb});node["natural"="peak"]["name"](${bb}););out tags geom;`;
   };
 
   const DIFF = { novice: 'Verte', easy: 'Verte', intermediate: 'Bleue', advanced: 'Rouge', expert: 'Noire', freeride: 'Hors-piste', extreme: 'Hors-piste (extrême)' };
@@ -138,7 +138,14 @@
 
   L.osmToGeoJSON = function (json) {
     const pistes = [], lifts = [], freeride = [];
+    const peaks = [];
     for (const el of (json && json.elements) || []) {
+      if (el.type === 'node' && el.tags && el.tags.natural === 'peak') {
+        const ele = parseFloat(String(el.tags.ele || '').replace(',', '.'));
+        peaks.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [el.lon, el.lat] },
+          properties: { id: 'osm-n' + el.id, kind: 'peak', name: el.tags.name, ele: Number.isFinite(ele) ? Math.round(ele) : null } });
+        continue;
+      }
       if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
       const t = el.tags || {};
       const coords = el.geometry.map(p => [p.lon, p.lat]);
@@ -162,8 +169,85 @@
     return {
       pistes: { type: 'FeatureCollection', features: pistes },
       lifts: { type: 'FeatureCollection', features: lifts },
-      freeride: { type: 'FeatureCollection', features: freeride }
+      freeride: { type: 'FeatureCollection', features: freeride },
+      peaks: { type: 'FeatureCollection', features: peaks }
     };
+  };
+
+  // ---------- Contour du domaine (enveloppe convexe + marge) et masque « hors zone »
+  L.convexHull = function (pts) {
+    const p = pts.map(q => [q[0], q[1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    if (p.length < 3) return p;
+    const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo = [], up = [];
+    for (const q of p) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+    for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop(); up.push(q); }
+    up.pop(); lo.pop();
+    return lo.concat(up);
+  };
+  // Agrandit un polygone convexe de « m » mètres (décalage de chaque côté + coins arrondis)
+  L.bufferHull = function (hull, m) {
+    if (hull.length < 3) return hull;
+    const lat0 = hull.reduce((a, q) => a + q[1], 0) / hull.length;
+    const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110540;
+    const P = hull.map(q => [q[0] * kx, q[1] * ky]);
+    const out = [];
+    const n = P.length;
+    for (let i = 0; i < n; i++) {
+      const prev = P[(i - 1 + n) % n], cur = P[i], next = P[(i + 1) % n];
+      const nrm = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1; return [dy / l, -dx / l]; };
+      const n1 = nrm(prev, cur), n2 = nrm(cur, next);
+      let a1 = Math.atan2(n1[1], n1[0]), a2 = Math.atan2(n2[1], n2[0]);
+      while (a2 < a1) a2 += 2 * Math.PI;
+      if (a2 - a1 > Math.PI) { const t = a1; a1 = a2 - 2 * Math.PI; a2 = t; }
+      const steps = Math.max(1, Math.ceil((a2 - a1) / (Math.PI / 12)));
+      for (let k = 0; k <= steps; k++) { const a = a1 + (a2 - a1) * k / steps; out.push([cur[0] + m * Math.cos(a), cur[1] + m * Math.sin(a)]); }
+    }
+    return out.map(q => [q[0] / kx, q[1] / ky]);
+  };
+  L.polyBBox = function (ring) {
+    const xs = ring.map(q => q[0]), ys = ring.map(q => q[1]);
+    return { west: Math.min(...xs), east: Math.max(...xs), south: Math.min(...ys), north: Math.max(...ys) };
+  };
+  L.pointInRing = function (pt, ring) {
+    let ins = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) ins = !ins;
+    }
+    return ins;
+  };
+  // Polygone « tout le reste du monde » percé de la zone : sert de masque
+  L.maskPolygon = function (ring) {
+    const r = ring.slice(); if (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1]) r.push(r[0]);
+    return { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[[-179, -85], [179, -85], [179, 85], [-179, 85], [-179, -85]], r.reverse()] } };
+  };
+  L.domainFrom = function (data) {
+    const pts = [];
+    for (const fc of [data.pistes, data.lifts]) for (const f of fc.features) { const c = f.geometry.coordinates; pts.push(c[0], c[c.length - 1], c[Math.floor(c.length / 2)]); }
+    if (pts.length < 10) return null;
+    return L.convexHull(pts);
+  };
+
+  // ---------- Choix de quelques sommets repères : les plus hauts, espacés d'au moins minSpacing mètres
+  L.pickPeaks = function (peaks, ring, n, minSpacing) {
+    const list = peaks.filter(f => f.properties.ele && (!ring || L.pointInRing(f.geometry.coordinates, ring)))
+      .sort((a, b) => b.properties.ele - a.properties.ele);
+    const keep = [];
+    for (const f of list) {
+      if (keep.length >= n) break;
+      if (keep.every(k => L.haversine(k.geometry.coordinates, f.geometry.coordinates) >= minSpacing)) keep.push(f);
+    }
+    return keep;
+  };
+
+  // ---------- Pente et orientation à partir de 4 altitudes voisines (est, ouest, nord, sud) écartées de d mètres
+  L.slopeAspect = function (zE, zW, zN, zS, d) {
+    const dzdx = (zE - zW) / (2 * d), dzdy = (zN - zS) / (2 * d);
+    const slope = Math.atan(Math.hypot(dzdx, dzdy)) * 180 / Math.PI;
+    // L'orientation = direction vers laquelle la pente « regarde » (sens de la descente)
+    const aspect = (Math.atan2(-dzdx, -dzdy) * 180 / Math.PI + 360) % 360;
+    return { slope, aspect };
   };
 
   // ---------- Camptocamp

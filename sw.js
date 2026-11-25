@@ -1,10 +1,10 @@
 /* Service worker : appli disponible hors-ligne + cache des morceaux de carte */
-const SHELL = '3v-shell-v1';
+const SHELL = '3v-shell-v2';
 const TILES = '3v-tiles';
 const API = '3v-api';
 const FILES = ['./', 'index.html', 'style.css', 'lib.js', 'app.js', 'manifest.webmanifest',
-  'vendor/maplibre-gl.js', 'vendor/maplibre-gl.css', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
-const TILE_HOSTS = ['data.geopf.fr', 's3.amazonaws.com'];
+  'vendor/maplibre-gl.js', 'vendor/maplibre-contour.js', 'vendor/maplibre-gl.css', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
+const TILE_HOSTS = ['data.geopf.fr', 's3.amazonaws.com', 'a.tile.opentopomap.org', 'b.tile.opentopomap.org', 'c.tile.opentopomap.org', 'protomaps.github.io'];
 const API_HOSTS = ['api.open-meteo.com', 'api.camptocamp.org'];
 
 self.addEventListener('install', e => {
